@@ -3,14 +3,17 @@ import io from 'socket.io-client'
 import Home from './components/Home'
 import BattleRoom from './components/BattleRoom'
 import { AnimatePresence, motion } from 'framer-motion'
+import Dashboard from './components/Dashboard'
 
-const socket = io('http://localhost:3001')
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001'
+const socket = io(BACKEND_URL)
 
 function App() {
   const [roomId, setRoomId] = useState(null)
   const [username, setUsername] = useState('')
   const [playerNum, setPlayerNum] = useState(null)
-  const [leaderboard, setLeaderboard] = useState({})
+  const [leaderboard, setLeaderboard] = useState([])
+  const [showDashboard, setShowDashboard] = useState(false)
 
   useEffect(() => {
     socket.on('roomJoined', (data) => {
@@ -53,6 +56,8 @@ function App() {
               leaderboard={leaderboard} 
               username={username}
               setUsername={setUsername}
+              onDashboardClick={() => setShowDashboard(true)}
+              apiUrl={BACKEND_URL}
             />
           </motion.div>
         ) : (
@@ -71,6 +76,17 @@ function App() {
               playerNum={playerNum} 
             />
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Stats Dashboard Modal */}
+      <AnimatePresence>
+        {showDashboard && (
+          <Dashboard 
+            onClose={() => setShowDashboard(false)} 
+            apiUrl={BACKEND_URL} 
+            username={username} 
+          />
         )}
       </AnimatePresence>
     </div>

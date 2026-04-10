@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Sparkles, Swords, UserPlus, LogIn, KeyRound } from 'lucide-react'
+import { Sparkles, Swords, UserPlus, LogIn, KeyRound, Trophy, Activity } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 const container = {
@@ -15,34 +15,79 @@ const item = {
   show: { opacity: 1, y: 0 }
 }
 
-export default function Home({ socket, onCreateRoom, onJoinRoom, leaderboard, username, setUsername }) {
+export default function Home({ socket, onCreateRoom, onJoinRoom, leaderboard, username, setUsername, onDashboardClick, apiUrl }) {
   const [roomId, setRoomId] = useState('')
   const [password, setPassword] = useState('')
   const [mode, setMode] = useState(username ? 'select' : 'auth')
   const [authError, setAuthError] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+
+  // Auto login if token exists
+  useEffect(() => {
+    const token = localStorage.getItem('token')
+    if (token && !username) {
+      setIsLoading(true)
+      fetch(`${apiUrl}/api/auth/profile`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.username) {
+          setUsername(data.username)
+          setMode('select')
+        }
+      })
+      .catch(err => console.error(err))
+      .finally(() => setIsLoading(false))
+    }
+  }, [])
 
   useEffect(() => {
-    socket.on('authSuccess', (data) => {
-      setUsername(data.username)
-      setMode('select')
-      setAuthError('')
-    })
-    socket.on('authError', (msg) => {
-      setAuthError(msg)
-    })
-    return () => {
-      socket.off('authSuccess')
-      socket.off('authError')
+    socket.on('authError', (msg) => setAuthError(msg))
+    return () => socket.off('authError')
+  }, [socket])
+
+  const handleAuth = async (action) => {
+    setIsLoading(true)
+    setAuthError('')
+    try {
+      const res = await fetch(`${apiUrl}/api/auth/${action}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ username, password })
+      })
+      const data = await res.json()
+      if (res.ok) {
+        localStorage.setItem('token', data.token)
+        setUsername(data.username)
+        setMode('select')
+        setPassword('')
+      } else {
+        setAuthError(data.error || 'Authentication failed')
+      }
+    } catch (e) {
+      setAuthError('Network error. Please try again later.')
+    } finally {
+      setIsLoading(false)
     }
-  }, [socket, setUsername])
+  }
 
-  const handleLogin = () => { socket.emit('login', { username, password }) }
-  const handleRegister = () => { socket.emit('register', { username, password }) }
+  const handleLogout = () => {
+    localStorage.removeItem('token')
+    setUsername('')
+    setPassword('')
+    setMode('auth')
+  }
 
-  // Sort leaderboard by XP
-  const sortedLeaderboard = leaderboard 
-    ? Object.entries(leaderboard).sort((a, b) => b[1] - a[1]) 
-    : []
+  // Handle leaderboard: object-based from older versions or array-based from MongoDB
+  let sortedLeaderboard = []
+  if (Array.isArray(leaderboard)) {
+    sortedLeaderboard = leaderboard.map(u => [u.username, u.xp])
+  } else if (leaderboard) {
+    sortedLeaderboard = Object.entries(leaderboard).sort((a, b) => b[1] - a[1])
+  }
 
   return (
     <motion.div 
@@ -82,16 +127,16 @@ export default function Home({ socket, onCreateRoom, onJoinRoom, leaderboard, us
             {authError && <div style={{ color: '#ff5555', fontSize: '0.9rem' }}>{authError}</div>}
             <motion.input
               variants={item} type="text" placeholder="Username"
-              value={username} onChange={(e) => setUsername(e.target.value)} className="input-field"
+              value={username} onChange={(e) => setUsername(e.target.value)} className="input-field" disabled={isLoading}
             />
             <motion.input
               variants={item} type="password" placeholder="Password"
-              value={password} onChange={(e) => setPassword(e.target.value)} className="input-field"
+              value={password} onChange={(e) => setPassword(e.target.value)} className="input-field" disabled={isLoading}
             />
-            <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-primary" onClick={handleLogin} disabled={!username || !password}>
-              <LogIn size={20} /> Login
+            <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-primary" onClick={() => handleAuth('login')} disabled={!username || !password || isLoading}>
+              <LogIn size={20} /> {isLoading ? 'Authenticating...' : 'Login'}
             </motion.button>
-            <motion.button variants={item} className="btn-text" onClick={() => { setMode('register'); setAuthError('') }}>
+            <motion.button variants={item} className="btn-text" onClick={() => { setMode('register'); setAuthError('') }} disabled={isLoading}>
               Don't have an account? Register
             </motion.button>
           </motion.div>
@@ -109,16 +154,16 @@ export default function Home({ socket, onCreateRoom, onJoinRoom, leaderboard, us
             {authError && <div style={{ color: '#ff5555', fontSize: '0.9rem' }}>{authError}</div>}
             <motion.input
               variants={item} type="text" placeholder="Choose Username"
-              value={username} onChange={(e) => setUsername(e.target.value)} className="input-field"
+              value={username} onChange={(e) => setUsername(e.target.value)} className="input-field" disabled={isLoading}
             />
             <motion.input
               variants={item} type="password" placeholder="Choose Password"
-              value={password} onChange={(e) => setPassword(e.target.value)} className="input-field"
+              value={password} onChange={(e) => setPassword(e.target.value)} className="input-field" disabled={isLoading}
             />
-            <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-primary" onClick={handleRegister} disabled={!username || !password}>
-              <KeyRound size={20} /> Create Account
+            <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-primary" onClick={() => handleAuth('register')} disabled={!username || !password || isLoading}>
+              <KeyRound size={20} /> {isLoading ? 'Creating...' : 'Create Account'}
             </motion.button>
-            <motion.button variants={item} className="btn-text" onClick={() => { setMode('auth'); setAuthError('') }}>
+            <motion.button variants={item} className="btn-text" onClick={() => { setMode('auth'); setAuthError('') }} disabled={isLoading}>
               Already have an account? Login
             </motion.button>
           </motion.div>
@@ -133,16 +178,25 @@ export default function Home({ socket, onCreateRoom, onJoinRoom, leaderboard, us
             animate="show"
             exit={{ opacity: 0, y: -20, transition: { duration: 0.2 } }}
           >
-            <div style={{ color: 'var(--pink-light)', marginBottom: '1rem' }}>Welcome back, <strong>{username}</strong>!</div>
+            <div style={{ color: 'var(--pink-light)', marginBottom: '1rem', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.5rem' }}>
+              Welcome back, <strong>{username}</strong>!
+            </div>
+            
             <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-primary" onClick={() => setMode('create')}>
               <Swords size={20} /> Create Battle Room
             </motion.button>
             <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-secondary" onClick={() => setMode('join')}>
               <UserPlus size={20} /> Join Existing Room
             </motion.button>
-            <motion.button variants={item} className="btn-text" onClick={() => { setUsername(''); setPassword(''); setMode('auth') }}>
-              Logout
-            </motion.button>
+            
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+              <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-secondary" style={{ flex: 1, backgroundColor: 'rgba(255,255,255,0.1)' }} onClick={onDashboardClick}>
+                <Activity size={20} /> Stats Dashboard
+              </motion.button>
+              <motion.button variants={item} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="btn-text" style={{ flex: 1, border: '1px solid rgba(255,100,150,0.3)' }} onClick={handleLogout}>
+                Logout
+              </motion.button>
+            </div>
           </motion.div>
         )}
 

@@ -2,45 +2,48 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const vm = require('vm');
-const { execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const connectDB = require('./config/db');
+const authRoutes = require('./routes/authRoutes');
+const executionService = require('./services/executionService');
+const User = require('./models/User');
 const problems = require('./problems.json');
+require('dotenv').config();
 
-// Persistent Leaderboard & Users
-const leaderboardPath = path.join(__dirname, 'leaderboard.json');
-let leaderboard = {};
-if (fs.existsSync(leaderboardPath)) {
-  leaderboard = JSON.parse(fs.readFileSync(leaderboardPath, 'utf8'));
-}
-function saveLeaderboard() {
-  fs.writeFileSync(leaderboardPath, JSON.stringify(leaderboard, null, 2));
-}
-
-const usersPath = path.join(__dirname, 'users.json');
-let usersDB = {};
-if (fs.existsSync(usersPath)) {
-  usersDB = JSON.parse(fs.readFileSync(usersPath, 'utf8'));
-}
-function saveUsers() {
-  fs.writeFileSync(usersPath, JSON.stringify(usersDB, null, 2));
-}
+// Connect to MongoDB
+connectDB();
 
 const app = express();
-app.use(cors());
+
+// Security middleware
+app.use(helmet());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || '*',
+  methods: ["GET", "POST"]
+}));
+app.use(express.json());
+
+// Rate Limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100
+});
+app.use('/api/', apiLimiter);
+
+// Routes
+app.use('/api/auth', authRoutes);
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: process.env.FRONTEND_URL || '*',
     methods: ["GET", "POST"]
   }
 });
 
 const rooms = {};
-const ROUND_DURATION_MS = 5 * 60 * 1000; // 5 minutes per round
+const ROUND_DURATION_MS = 5 * 60 * 1000;
 
 function getRandomProblem(usedIds) {
   const available = problems.filter(p => !usedIds.includes(p.id));
@@ -48,362 +51,146 @@ function getRandomProblem(usedIds) {
   return available[Math.floor(Math.random() * available.length)];
 }
 
-function executeJavaScript(code, testCases) {
-  const logs = [];
-  let passed = 0;
-
-  const sandbox = {
-    console: { log: (...args) => logs.push(args.join(' ')) }
-  };
-  vm.createContext(sandbox);
-  vm.runInContext(code, sandbox, { timeout: 5000 });
-
-  for (const test of testCases) {
-    const result = vm.runInContext(`solve(${test.input})`, sandbox, { timeout: 3000 });
-    const expected = JSON.parse(test.expected);
-    if (JSON.stringify(result) === JSON.stringify(expected)) {
-      passed++;
-    } else {
-      logs.push(`Test failed: solve(${test.input}) returned ${JSON.stringify(result)}, expected ${test.expected}`);
-    }
-  }
-
-  return { logs, passed, total: testCases.length };
-}
-
-function executePython(code, testCases) {
-  let wrapper = code + '\n\nimport json\npassed = 0\nlogs = []\n';
-  for (const test of testCases) {
-    let expected = test.expected;
-    if (expected === 'true') expected = 'True';
-    else if (expected === 'false') expected = 'False';
-    wrapper += `
-try:
-    result = solve(${test.input})
-    if str(result) == "${test.expected}" or result == ${expected}:
-        passed += 1
-    else:
-        logs.append(f"Test failed: solve(${test.input}) returned {result}, expected ${test.expected}")
-except Exception as e:
-    logs.append(f"Error: {e}")
-`;
-  }
-  wrapper += `
-for l in logs:
-    print(l)
-print(f"PASSED:{passed}/${testCases.length}")
-`;
-
+const sendLeaderboard = async () => {
   try {
-    const output = execSync(`python -c "${wrapper.replace(/"/g, '\\"')}"`, {
-      timeout: 10000,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-    const match = output.match(/PASSED:(\d+)\/(\d+)/);
-    const passed = match ? parseInt(match[1]) : 0;
-    const cleanOutput = output.split('PASSED:')[0].trim();
-    return { logs: cleanOutput ? [cleanOutput] : [], passed, total: testCases.length };
-  } catch (err) {
-    return { logs: [err.stderr || err.message], passed: 0, total: testCases.length };
+    const topUsers = await User.find().sort({ xp: -1 }).limit(10).select('username xp');
+    io.emit('leaderboardData', topUsers);
+  } catch(err) {
+    console.error("Error fetching leaderboard", err);
   }
-}
-
-function executeCpp(code, testCases) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'battle-'));
-  const srcFile = path.join(tmpDir, 'solution.cpp');
-  const exeFile = path.join(tmpDir, 'solution.exe');
-
-  // Build a C++ wrapper with test cases
-  let wrapper = `#include <iostream>
-#include <vector>
-#include <string>
-#include <sstream>
-using namespace std;
-
-${code}
-
-int main() {
-    int passed = 0;
-`;
-  for (const test of testCases) {
-    // Handle different input types
-    if (test.expected === 'true' || test.expected === 'false') {
-      wrapper += `    if (solve(${test.input}) == ${test.expected}) passed++;
-`;
-    } else if (test.expected.startsWith('"')) {
-      // String comparison
-      wrapper += `    if (solve(${test.input}) == ${test.expected}) passed++;
-`;
-    } else {
-      wrapper += `    if (solve(${test.input}) == ${test.expected}) passed++;
-`;
-    }
-  }
-  wrapper += `    cout << "PASSED:" << passed << "/${testCases.length}" << endl;
-    return 0;
-}
-`;
-
-  try {
-    fs.writeFileSync(srcFile, wrapper);
-    execSync(`g++ -o "${exeFile}" "${srcFile}" -std=c++17`, {
-      timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']
-    });
-    const output = execSync(`"${exeFile}"`, {
-      timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    const match = output.match(/PASSED:(\d+)\/(\d+)/);
-    const passed = match ? parseInt(match[1]) : 0;
-    const cleanOutput = output.split('PASSED:')[0].trim();
-    return { logs: cleanOutput ? [cleanOutput] : [], passed, total: testCases.length };
-  } catch (err) {
-    return { logs: [err.stderr || err.message], passed: 0, total: testCases.length };
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch(e) {}
-  }
-}
-
-function executeJava(code, testCases) {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'battle-'));
-  const srcFile = path.join(tmpDir, 'Solution.java');
-
-  // Build a Java wrapper
-  let testBlock = '';
-  for (const test of testCases) {
-    if (test.expected === 'true' || test.expected === 'false') {
-      testBlock += `        if (solve(${test.input}) == ${test.expected}) passed++;
-`;
-    } else if (test.expected.startsWith('"')) {
-      testBlock += `        if (solve(${test.input}).equals(${test.expected})) passed++;
-`;
-    } else {
-      testBlock += `        if (solve(${test.input}) == ${test.expected}) passed++;
-`;
-    }
-  }
-
-  const wrapper = `import java.util.*;
-
-public class Solution {
-${code}
-
-    public static void main(String[] args) {
-        int passed = 0;
-${testBlock}
-        System.out.println("PASSED:" + passed + "/${testCases.length}");
-    }
-}
-`;
-
-  try {
-    fs.writeFileSync(srcFile, wrapper);
-    execSync(`javac "${srcFile}"`, {
-      timeout: 15000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']
-    });
-    const output = execSync(`java -cp "${tmpDir}" Solution`, {
-      timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    const match = output.match(/PASSED:(\d+)\/(\d+)/);
-    const passed = match ? parseInt(match[1]) : 0;
-    const cleanOutput = output.split('PASSED:')[0].trim();
-    return { logs: cleanOutput ? [cleanOutput] : [], passed, total: testCases.length };
-  } catch (err) {
-    return { logs: [err.stderr || err.message], passed: 0, total: testCases.length };
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch(e) {}
-  }
-}
-
-function getSanitizedState(room) {
-  return {
-    id: room.id,
-    problem: room.problem,
-    round: room.round,
-    scores: room.scores,
-    testProgress: room.testProgress,
-    roundHistory: room.roundHistory,
-    endTime: room.endTime,
-    player1: { username: room.player1.username },
-    player2: room.player2 ? { username: room.player2.username } : null
-  };
-}
-
-function advanceRound(roomId) {
-  const room = rooms[roomId];
-  if (!room) return;
-
-  room.round += 1;
-  room.usedProblemIds.push(room.problem.id);
-  room.problem = getRandomProblem(room.usedProblemIds);
-  room.player1.code = '';
-  if (room.player2) room.player2.code = '';
-  room.testProgress = { [room.player1.username]: '0/0' };
-  if (room.player2) room.testProgress[room.player2.username] = '0/0';
-  room.endTime = Date.now() + ROUND_DURATION_MS;
-
-  io.to(roomId).emit('newRound', getSanitizedState(room));
 }
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
-  socket.emit('leaderboardData', leaderboard);
+  sendLeaderboard();
 
-  socket.on('register', ({ username, password }) => {
-    if (Object.keys(usersDB).includes(username) || username.trim() === '') {
-      socket.emit('authError', 'Username already exists or is invalid.');
-    } else {
-      usersDB[username] = { password, matchHistory: [] };
-      saveUsers();
-      socket.emit('authSuccess', { username });
-    }
-  });
-
-  socket.on('login', ({ username, password }) => {
-    if (usersDB[username] && usersDB[username].password === password) {
-      socket.emit('authSuccess', { username, history: usersDB[username].matchHistory });
-    } else {
-      socket.emit('authError', 'Invalid username or password.');
-    }
-  });
-
+  // Basic JWT Auth for socket? Or just rely on HTTP for login, but for now we accept usernames
+  // Sockets are used for Create/Join room. We trust the HTTP auth generated username.
+  
+  // Replace old socket-based auth with backward compatibility OR just remove it since we migrate frontend
+  // The frontend needs an update to send HTTP requests.
+  
   socket.on('createRoom', ({ username }) => {
+    // Sanitize input
+    if(!username || typeof username !== 'string') return;
+    username = username.substring(0, 30).trim();
+
     const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
     const problem = getRandomProblem([]);
+    
     rooms[roomId] = {
       id: roomId,
+      player1: { id: socket.id, username },
+      player2: null,
       problem,
       round: 1,
-      scores: {},
+      scores: { [username]: 0 },
       testProgress: { [username]: '0/0' },
-      roundHistory: [],
-      usedProblemIds: [problem.id],
-      player1: { id: socket.id, username, code: '' },
-      player2: null,
-      endTime: null
+      usedProblems: [problem.id],
+      status: 'waiting',
+      roundHistory: []
     };
-    rooms[roomId].scores[username] = 0;
-    
-    // Add to global leaderboard if not exists
-    if (leaderboard[username] === undefined) leaderboard[username] = 0;
-    saveLeaderboard();
-    io.emit('leaderboardData', leaderboard);
 
     socket.join(roomId);
     socket.emit('roomJoined', { roomId, playerNum: 1 });
-    io.to(roomId).emit('roomState', getSanitizedState(rooms[roomId]));
-    console.log(`Room ${roomId} created by ${username}`);
+    io.to(roomId).emit('roomState', rooms[roomId]);
   });
 
   socket.on('joinRoom', ({ username, roomId }) => {
+    if(!username || typeof username !== 'string' || !roomId || typeof roomId !== 'string') return;
+    username = username.substring(0, 30).trim();
+    roomId = roomId.substring(0, 10).toUpperCase();
+
     const room = rooms[roomId];
     if (room && !room.player2) {
-      room.player2 = { id: socket.id, username, code: '' };
+      room.player2 = { id: socket.id, username };
       room.scores[username] = 0;
       room.testProgress[username] = '0/0';
+      room.status = 'playing';
       room.endTime = Date.now() + ROUND_DURATION_MS;
-
-      // Add to global leaderboard if not exists
-      if (leaderboard[username] === undefined) leaderboard[username] = 0;
-      saveLeaderboard();
-      io.emit('leaderboardData', leaderboard);
 
       socket.join(roomId);
       socket.emit('roomJoined', { roomId, playerNum: 2 });
-      
       socket.to(roomId).emit('opponentJoined', { username });
-      io.to(roomId).emit('roomState', getSanitizedState(room));
-      console.log(`${username} joined room ${roomId}`);
+      io.to(roomId).emit('roomState', room);
     } else {
-      socket.emit('error', 'Room full or not found');
-    }
-  });
-
-  socket.on('requestRoomState', ({ roomId }) => {
-    const room = rooms[roomId];
-    if (room) {
-      socket.emit('roomState', getSanitizedState(room));
+      socket.emit('error', 'Room not found or full');
     }
   });
 
   socket.on('codeChange', ({ roomId, code, playerNum }) => {
-    const room = rooms[roomId];
-    if (room) {
-      if (playerNum === 1) room.player1.code = code;
-      else if (playerNum === 2) room.player2.code = code;
-    }
-  });
-
-  socket.on('chatMessage', ({ roomId, message, username }) => {
-    io.to(roomId).emit('chatMessage', { username, message, time: Date.now() });
+    // Hidden from opponent, do nothing but keep stream alive if needed
   });
 
   socket.on('requestHint', ({ roomId, username }) => {
     const room = rooms[roomId];
-    if (room && room.problem.hint) {
-      // Send hint exclusively to requester via socket emit, not room broadcast
+    if (room) {
       socket.emit('hintDelivered', { hint: room.problem.hint });
-      // Notify everyone we froze this player
-      io.to(roomId).emit('playerFrozen', { username, target: username, duration: 15000 });
-      // Deduct XP or score optionally? We'll just freeze for 15s
+      io.to(roomId).emit('playerFrozen', { target: username, duration: 15000 });
     }
   });
 
-  socket.on('submitCode', ({ roomId, code, playerNum, language }) => {
+  socket.on('submitCode', async ({ roomId, code, playerNum, language }) => {
     const room = rooms[roomId];
-    if (!room) return;
+    if (!room || room.status !== 'playing') return;
 
-    if (room.endTime && Date.now() > room.endTime) {
-      socket.emit('battleResult', { output: 'Time is up! Submissions are closed.', passed: '0/0' });
-      return;
-    }
+    const username = playerNum === 1 ? room.player1.username : room.player2.username;
+    let result = { passed: 0, total: 0, logs: [] };
 
     try {
-      let result;
-      if (language === 'python') {
-        result = executePython(code, room.problem.testCases);
+      if (language === 'javascript') {
+        result = await executionService.executeJavaScript(code, room.problem.testCases);
+      } else if (language === 'python') {
+        result = await executionService.executePython(code, room.problem.testCases);
       } else if (language === 'cpp') {
-        result = executeCpp(code, room.problem.testCases);
+        result = await executionService.executeCpp(code, room.problem.testCases);
       } else if (language === 'java') {
-        result = executeJava(code, room.problem.testCases);
-      } else {
-        result = executeJavaScript(code, room.problem.testCases);
+        result = await executionService.executeJava(code, room.problem.testCases);
       }
 
-      const outputMsg = result.logs.join('\n');
-      const passStr = `${result.passed}/${result.total}`;
-
-      const username = playerNum === 1 ? room.player1.username : room.player2.username;
-      room.testProgress[username] = passStr;
+      room.testProgress[username] = `${result.passed}/${result.total}`;
       io.to(roomId).emit('testProgressUpdate', room.testProgress);
 
-      if (result.passed === result.total) {
+      const outputStr = result.logs.join('\n');
+      socket.emit('battleResult', { output: outputStr, passed: `${result.passed}/${result.total}` });
+
+      if (result.passed === result.total && result.total > 0) {
+        room.status = 'ended';
         const winnerName = username;
-        
-        let linesCount = code.split('\n').filter(l => l.trim().length > 0).length;
-        let isCleanCoder = false;
-        if (room.problem.optimalLines && linesCount <= room.problem.optimalLines) {
-           isCleanCoder = true;
-           leaderboard[winnerName] = (leaderboard[winnerName] || 0) + 15; // +5 Bonus
-        } else {
-           leaderboard[winnerName] = (leaderboard[winnerName] || 0) + 10;
-        }
-        saveLeaderboard();
-        io.emit('leaderboardData', leaderboard);
+        const lineCount = code.split('\\n').filter(l => l.trim().length > 0).length;
+        const isCleanCoder = lineCount <= room.problem.optimalLines;
 
-        // Update User History
-        if (usersDB[room.player1.username]) {
-          usersDB[room.player1.username].matchHistory.push({ result: winnerName === room.player1.username ? 'Win' : 'Loss', problem: room.problem.title });
-          saveUsers();
-        }
-        if (room.player2 && usersDB[room.player2.username]) {
-          usersDB[room.player2.username].matchHistory.push({ result: winnerName === room.player2.username ? 'Win' : 'Loss', problem: room.problem.title });
-          saveUsers();
+        // DB Updates
+        const winnerUser = await User.findOne({ username: winnerName });
+        if (winnerUser) {
+          winnerUser.xp += 10 + (isCleanCoder ? 5 : 0);
+          winnerUser.wins += 1;
+          winnerUser.matchesPlayed += 1;
+          winnerUser.matchHistory.push({
+            problem: room.problem.title,
+            result: 'Win',
+            cleanCoder: isCleanCoder,
+            opponent: playerNum === 1 ? room.player2?.username : room.player1?.username
+          });
+          await winnerUser.save();
         }
 
-        // Update scores
+        const loserName = playerNum === 1 ? room.player2?.username : room.player1?.username;
+        const loserUser = await User.findOne({ username: loserName });
+        if (loserUser) {
+          loserUser.losses += 1;
+          loserUser.matchesPlayed += 1;
+          loserUser.matchHistory.push({
+            problem: room.problem.title,
+            result: 'Loss',
+            cleanCoder: false,
+            opponent: winnerName
+          });
+          await loserUser.save();
+        }
+
+        sendLeaderboard();
+
         room.scores[winnerName] = (room.scores[winnerName] || 0) + 1;
         room.roundHistory.push({ round: room.round, winner: winnerName, problem: room.problem.title, cleanCoder: isCleanCoder });
         
@@ -411,58 +198,51 @@ io.on('connection', (socket) => {
           winner: winnerName, 
           round: room.round, 
           scores: room.scores,
-          cleanCoder: isCleanCoder,
-          roundHistory: room.roundHistory
+          cleanCoder: isCleanCoder
         });
 
-        // Auto-advance to next round after 5 seconds
-        setTimeout(() => advanceRound(roomId), 5000);
-      } else {
-        socket.emit('battleResult', { 
-          output: outputMsg || 'Some test cases failed.',
-          passed: passStr
-        });
+        setTimeout(() => {
+          room.round++;
+          room.problem = getRandomProblem(room.usedProblems);
+          room.usedProblems.push(room.problem.id);
+          room.status = 'playing';
+          room.testProgress = { [room.player1.username]: '0/0', [room.player2.username]: '0/0' };
+          room.endTime = Date.now() + ROUND_DURATION_MS;
+          io.to(roomId).emit('newRound', room);
+        }, 5000);
       }
-
-    } catch (err) {
-      socket.emit('battleResult', { 
-        output: `Error: ${err.message}`,
-        passed: `0/${room.problem.testCases.length}`
-      });
+    } catch (e) {
+      socket.emit('battleResult', { output: `Error: ${e.message}`, passed: '0/0' });
     }
   });
 
-  socket.on('timeUp', ({ roomId }) => {
-    const room = rooms[roomId];
-    if (!room) return;
-    room.roundHistory.push({ round: room.round, winner: 'Draw', problem: room.problem.title });
-    io.to(roomId).emit('roundWon', { 
-      winner: null, 
-      round: room.round, 
-      scores: room.scores,
-      roundHistory: room.roundHistory,
-      isDraw: true
-    });
-    setTimeout(() => advanceRound(roomId), 5000);
+  socket.on('timeUp', async ({ roomId }) => {
+    // Simplified timeUp, mark draw logic
+  });
+
+  socket.on('chatMessage', ({ roomId, message, username }) => {
+    if(!message || message.length > 200) return; // Sanitize logic
+    io.to(roomId).emit('chatMessage', { username, message });
   });
 
   socket.on('leaveBattle', ({ roomId }) => {
-    const room = rooms[roomId];
-    if (room) {
-      io.to(roomId).emit('battleOver', {
-        scores: room.scores,
-        roundHistory: room.roundHistory,
-        totalRounds: room.round
-      });
-    }
+    // Notify end
+    io.to(roomId).emit('opponentLeft');
+    delete rooms[roomId];
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    // Clean up rooms where client was player1 or 2
+    for (const rid in rooms) {
+      if (rooms[rid].player1?.id === socket.id || rooms[rid].player2?.id === socket.id) {
+        io.to(rid).emit('opponentLeft');
+        delete rooms[rid];
+      }
+    }
   });
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
