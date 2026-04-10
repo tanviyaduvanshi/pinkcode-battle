@@ -5,7 +5,7 @@ import BattleRoom from './components/BattleRoom'
 import { AnimatePresence, motion } from 'framer-motion'
 import Dashboard from './components/Dashboard'
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001'
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
 const socket = io(BACKEND_URL)
 
 function App() {
@@ -23,8 +23,8 @@ function App() {
     socket.on('leaderboardData', (data) => {
       setLeaderboard(data)
     })
-    return () => { 
-      socket.off('roomJoined') 
+    return () => {
+      socket.off('roomJoined')
       socket.off('leaderboardData')
     }
   }, [])
@@ -49,11 +49,11 @@ function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.3 } }}
           >
-            <Home 
+            <Home
               socket={socket}
-              onCreateRoom={handleCreateRoom} 
-              onJoinRoom={handleJoinRoom} 
-              leaderboard={leaderboard} 
+              onCreateRoom={handleCreateRoom}
+              onJoinRoom={handleJoinRoom}
+              leaderboard={leaderboard}
               username={username}
               setUsername={setUsername}
               onDashboardClick={() => setShowDashboard(true)}
@@ -69,11 +69,11 @@ function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.4 }}
           >
-            <BattleRoom 
-              socket={socket} 
-              roomId={roomId} 
-              username={username} 
-              playerNum={playerNum} 
+            <BattleRoom
+              socket={socket}
+              roomId={roomId}
+              username={username}
+              playerNum={playerNum}
             />
           </motion.div>
         )}
@@ -82,10 +82,10 @@ function App() {
       {/* Stats Dashboard Modal */}
       <AnimatePresence>
         {showDashboard && (
-          <Dashboard 
-            onClose={() => setShowDashboard(false)} 
-            apiUrl={BACKEND_URL} 
-            username={username} 
+          <Dashboard
+            onClose={() => setShowDashboard(false)}
+            apiUrl={BACKEND_URL}
+            username={username}
           />
         )}
       </AnimatePresence>
