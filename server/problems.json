@@ -3,6 +3,8 @@
     "id": 1,
     "title": "Sum Array",
     "description": "Write a function named 'solve' that takes an array of numbers and returns their sum.",
+    "hint": "Try using a loop to iterate through the array and accumulate the total, or use the built-in reduce method.",
+    "optimalLines": 5,
     "testCases": [
       { "input": "[1, 2, 3]", "expected": "6" },
       { "input": "[10, -10]", "expected": "0" },
@@ -13,6 +15,8 @@
     "id": 2,
     "title": "Nth Fibonacci",
     "description": "Write a function named 'solve' that takes an integer N and returns the Nth Fibonacci number. (Assume solve(0) = 0, solve(1) = 1)",
+    "hint": "You can solve this using recursion, but recursion is slow. Try using a loop to build up to the Nth number starting from 0 and 1.",
+    "optimalLines": 8,
     "testCases": [
       { "input": "0", "expected": "0" },
       { "input": "5", "expected": "5" },
@@ -23,16 +27,20 @@
     "id": 3,
     "title": "Palindrome String",
     "description": "Write a function named 'solve' that takes a string and returns true if it is a palindrome, and false otherwise.",
+    "hint": "A string is a palindrome if it reads the same forwards and backwards. Try reversing the string and comparing it to the original.",
+    "optimalLines": 5,
     "testCases": [
-      { "input": "'racecar'", "expected": "true" },
-      { "input": "'hello'", "expected": "false" },
-      { "input": "''", "expected": "true" }
+      { "input": "\"racecar\"", "expected": "true" },
+      { "input": "\"hello\"", "expected": "false" },
+      { "input": "\"\"", "expected": "true" }
     ]
   },
   {
     "id": 4,
     "title": "Factorial",
     "description": "Write a function named 'solve' that takes a non-negative integer N and returns N! (N factorial). solve(0) = 1.",
+    "hint": "Factorial of N is N * (N-1) * ... * 1. You can write a loop from 1 to N and multiply a running product.",
+    "optimalLines": 6,
     "testCases": [
       { "input": "0", "expected": "1" },
       { "input": "5", "expected": "120" },
@@ -43,26 +51,32 @@
     "id": 5,
     "title": "Reverse String",
     "description": "Write a function named 'solve' that takes a string and returns it reversed.",
+    "hint": "Start an empty string and iterate over the input string backwards, appending characters to your new string.",
+    "optimalLines": 5,
     "testCases": [
-      { "input": "'hello'", "expected": "\"olleh\"" },
-      { "input": "'abc'", "expected": "\"cba\"" },
-      { "input": "''", "expected": "\"\"" }
+      { "input": "\"hello\"", "expected": "\"olleh\"" },
+      { "input": "\"abc\"", "expected": "\"cba\"" },
+      { "input": "\"\"", "expected": "\"\"" }
     ]
   },
   {
     "id": 6,
     "title": "Count Vowels",
     "description": "Write a function named 'solve' that takes a string and returns the number of vowels (a, e, i, o, u) in it.",
+    "hint": "Create a string or array containing 'aeiou'. Loop through the input string and increment a counter if the character is in your vowels list.",
+    "optimalLines": 6,
     "testCases": [
-      { "input": "'hello'", "expected": "2" },
-      { "input": "'aeiou'", "expected": "5" },
-      { "input": "'xyz'", "expected": "0" }
+      { "input": "\"hello\"", "expected": "2" },
+      { "input": "\"aeiou\"", "expected": "5" },
+      { "input": "\"xyz\"", "expected": "0" }
     ]
   },
   {
     "id": 7,
     "title": "Max in Array",
     "description": "Write a function named 'solve' that takes an array of numbers and returns the maximum value.",
+    "hint": "Initialize a max variable to the first element (or negative infinity). Iterate through the array and update max if you find a larger element.",
+    "optimalLines": 6,
     "testCases": [
       { "input": "[1, 5, 3]", "expected": "5" },
       { "input": "[-1, -5, -3]", "expected": "-1" },

@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import Editor from '@monaco-editor/react'
-import { Play, Trophy, Users, Clock, MessageSquare, Send, Shield, LogOut } from 'lucide-react'
+import { Play, Trophy, Users, Clock, MessageSquare, Send, Shield, LogOut, Download, Lock } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import confetti from 'canvas-confetti'
+import html2canvas from 'html2canvas'
 
 const boilerplate = {
   javascript: '// Write your code here...\nfunction solve(n) {\n  \n}',
@@ -34,6 +36,12 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
   const [messages, setMessages] = useState([])
   const [chatInput, setChatInput] = useState('')
   const chatEndRef = useRef(null)
+  
+  const [testProgress, setTestProgress] = useState({})
+  const [hint, setHint] = useState(null)
+  const [isFrozen, setIsFrozen] = useState(false)
+  const [freezeTime, setFreezeTime] = useState(0)
+  const freezeIntervalRef = useRef(null)
 
   useEffect(() => {
     socket.emit('requestRoomState', { roomId })
@@ -42,25 +50,58 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
       setProblem(state.problem)
       setRound(state.round)
       if (state.scores) setScores(state.scores)
+      if (state.testProgress) setTestProgress(state.testProgress)
       if (playerNum === 1 && state.player2) setOpponentName(state.player2.username)
       else if (playerNum === 2 && state.player1) setOpponentName(state.player1.username)
       if (state.endTime) startTimer(state.endTime)
     })
 
+    socket.on('testProgressUpdate', (progressObj) => {
+      setTestProgress(progressObj)
+    })
+
     socket.on('roundWon', (data) => {
       if (timerRef.current) clearInterval(timerRef.current)
       setScores(data.scores)
-      setRoundOverlay({ winner: data.winner, round: data.round, isDraw: data.isDraw || false })
+      setRoundOverlay({ winner: data.winner, round: data.round, isDraw: data.isDraw || false, cleanCoder: data.cleanCoder })
+      if (!data.isDraw) {
+        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 }, colors: ['#ff2e93', '#00d2ff', '#ffd700'] })
+      }
     })
 
     socket.on('newRound', (state) => {
       setRoundOverlay(null)
+      setHint(null)
+      setIsFrozen(false)
       setProblem(state.problem)
       setRound(state.round)
       setScores(state.scores)
-      setMyCode('// Write your code here...\nfunction solve(n) {\n  \n}')
+      if (state.testProgress) setTestProgress(state.testProgress)
+      setMyCode(boilerplate[language])
       setOutput('')
       if (state.endTime) startTimer(state.endTime)
+    })
+
+    socket.on('hintDelivered', (data) => {
+      setHint(data.hint)
+    })
+
+    socket.on('playerFrozen', (data) => {
+      if (data.target === username) {
+        setIsFrozen(true)
+        setFreezeTime(data.duration / 1000)
+        if (freezeIntervalRef.current) clearInterval(freezeIntervalRef.current)
+        freezeIntervalRef.current = setInterval(() => {
+          setFreezeTime(prev => {
+            if (prev <= 1) {
+              clearInterval(freezeIntervalRef.current)
+              setIsFrozen(false)
+              return 0
+            }
+            return prev - 1
+          })
+        }, 1000)
+      }
     })
 
     socket.on('battleResult', (result) => {
@@ -76,9 +117,11 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
+      if (freezeIntervalRef.current) clearInterval(freezeIntervalRef.current)
       socket.off('roomState'); socket.off('roundWon'); socket.off('newRound')
       socket.off('battleResult'); socket.off('opponentJoined')
-      socket.off('chatMessage'); socket.off('battleOver')
+      socket.off('chatMessage'); socket.off('battleOver'); socket.off('testProgressUpdate')
+      socket.off('hintDelivered'); socket.off('playerFrozen')
     }
   }, [socket, playerNum, roomId])
 
@@ -113,6 +156,17 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
   }
   const copyRoomId = () => { navigator.clipboard.writeText(roomId); alert('Room ID copied!') }
   const handleLeave = () => { socket.emit('leaveBattle', { roomId }) }
+  const requestHint = () => { socket.emit('requestHint', { roomId, username }) }
+
+  const downloadScoreboard = async () => {
+    const el = document.getElementById('final-scoreboard-capture')
+    if (!el) return
+    const canvas = await html2canvas(el, { backgroundColor: '#0f0c1b' })
+    const link = document.createElement('a')
+    link.download = 'pink-code-battle-result.png'
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+  }
   const formatTime = (seconds) => {
     if (seconds === null) return "Waiting..."
     const m = Math.floor(seconds / 60).toString().padStart(2, '0')
@@ -132,89 +186,98 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
 
     return (
       <div className="app-container">
-        <motion.div 
-          className="scoreboard-modal glass-panel"
-          initial={{ opacity: 0, scale: 0.8 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ type: 'spring', stiffness: 200, damping: 20 }}
-        >
-          <motion.h1 
-            className="scoreboard-title"
-            initial={{ y: -30, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ delay: 0.2 }}
+        <div>
+          <motion.div 
+            id="final-scoreboard-capture"
+            className="scoreboard-modal glass-panel"
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ type: 'spring', stiffness: 200, damping: 20 }}
           >
-            <Trophy size={36} className="icon-gold" /> Battle Over!
-          </motion.h1>
+            <motion.h1 
+              className="scoreboard-title"
+              initial={{ y: -30, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.2 }}
+            >
+              <Trophy size={36} className="icon-gold" /> Battle Over!
+            </motion.h1>
+            
+            <motion.div 
+              className={`overall-winner ${!overallWinner ? 'draw' : ''}`}
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ delay: 0.4, type: 'spring', stiffness: 300 }}
+            >
+              {overallWinner ? `${overallWinner} is the Champion!` : "It's a Draw!"}
+            </motion.div>
+
+            <div className="score-cards">
+              {sorted.map(([name, score], idx) => (
+                <motion.div 
+                  key={name} 
+                  className={`score-card glass-panel ${name === overallWinner ? 'winner-card' : ''}`}
+                  initial={{ opacity: 0, y: 40 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.5 + idx * 0.2 }}
+                >
+                  <h2>{name}</h2>
+                  <motion.span 
+                    className="big-score"
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    transition={{ delay: 0.8 + idx * 0.2, type: 'spring', stiffness: 300 }}
+                  >
+                    {score}
+                  </motion.span>
+                  <span className="score-label">rounds won</span>
+                </motion.div>
+              ))}
+            </div>
+
+            <motion.h3 initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1 }}>
+              Round History
+            </motion.h3>
+            <motion.div 
+              className="round-history"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 1.1 }}
+            >
+              {finalScore.roundHistory.map((rh, i) => (
+                <motion.div 
+                  key={i} 
+                  className="history-row glass-panel"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 1.2 + i * 0.1 }}
+                >
+                  <span className="round-num">Round {rh.round}</span>
+                  <span className="round-problem">{rh.problem}</span>
+                  <span className="round-winner-tag">
+                    {rh.winner === 'Draw' ? 'Draw' : `${rh.winner} won`}
+                    {rh.cleanCoder && <span className="clean-coder-badge">Clean!</span>}
+                  </span>
+                </motion.div>
+              ))}
+            </motion.div>
+          </motion.div>
           
           <motion.div 
-            className={`overall-winner ${!overallWinner ? 'draw' : ''}`}
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 0.4, type: 'spring', stiffness: 300 }}
+            style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.5 }}
           >
-            {overallWinner ? `${overallWinner} is the Champion!` : "It's a Draw!"}
+            <button className="download-btn" onClick={downloadScoreboard}>
+              <Download size={18} /> Download for LinkedIn
+            </button>
+            <button 
+              className="btn-text" style={{ marginTop: '1rem', color: 'var(--text-main)' }}
+              onClick={() => window.location.reload()}
+            >
+              Back to Lobby
+            </button>
           </motion.div>
-
-          <div className="score-cards">
-            {sorted.map(([name, score], idx) => (
-              <motion.div 
-                key={name} 
-                className={`score-card glass-panel ${name === overallWinner ? 'winner-card' : ''}`}
-                initial={{ opacity: 0, y: 40 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.5 + idx * 0.2 }}
-              >
-                <h2>{name}</h2>
-                <motion.span 
-                  className="big-score"
-                  initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
-                  transition={{ delay: 0.8 + idx * 0.2, type: 'spring', stiffness: 300 }}
-                >
-                  {score}
-                </motion.span>
-                <span className="score-label">rounds won</span>
-              </motion.div>
-            ))}
-          </div>
-
-          <motion.h3 initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1 }}>
-            Round History
-          </motion.h3>
-          <motion.div 
-            className="round-history"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 1.1 }}
-          >
-            {finalScore.roundHistory.map((rh, i) => (
-              <motion.div 
-                key={i} 
-                className="history-row glass-panel"
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 1.2 + i * 0.1 }}
-              >
-                <span className="round-num">Round {rh.round}</span>
-                <span className="round-problem">{rh.problem}</span>
-                <span className="round-winner-tag">{rh.winner === 'Draw' ? 'Draw' : `${rh.winner} won`}</span>
-              </motion.div>
-            ))}
-          </motion.div>
-
-          <motion.button 
-            className="btn-primary" 
-            onClick={() => window.location.reload()}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 1.5 }}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-          >
-            Back to Lobby
-          </motion.button>
-        </motion.div>
+        </div>
       </div>
     )
   }
@@ -320,6 +383,11 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
                     transition={{ delay: 0.4 }}
                   >
                     {roundOverlay.winner} wins Round {roundOverlay.round}!
+                    {roundOverlay.cleanCoder && (
+                      <div style={{ marginTop: '0.5rem' }}>
+                        <span className="clean-coder-badge" style={{ fontSize: '1rem', padding: '0.3rem 0.8rem'}}>+ Clean Coder Bonus</span>
+                      </div>
+                    )}
                   </motion.h2>
                 </>
               )}
@@ -352,6 +420,15 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
           >
             <h3>Question: {problem?.title || 'Loading...'}</h3>
             <p>{problem?.description}</p>
+            
+            {problem?.hint && !hint && (
+              <button className="hint-btn" onClick={requestHint}>
+                Get Hint (Freeze your editor for 15s)
+              </button>
+            )}
+            {hint && (
+              <div className="hint-text"><strong>Hint:</strong> {hint}</div>
+            )}
           </motion.div>
 
           <div className="editors-wrapper">
@@ -386,8 +463,15 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
                 theme="vs-dark"
                 value={myCode}
                 onChange={handleCodeChange}
-                options={{ readOnly: !!roundOverlay || timeLeft === 0, minimap: { enabled: false }, fontSize: 14 }}
+                options={{ readOnly: !!roundOverlay || timeLeft === 0 || isFrozen, minimap: { enabled: false }, fontSize: 14 }}
               />
+              {isFrozen && (
+                <div className="freeze-overlay">
+                  <Lock size={48} color="#ff5555" />
+                  <div className="freeze-text">FROZEN</div>
+                  <div className="freeze-sub">{freezeTime} seconds left</div>
+                </div>
+              )}
             </motion.div>
 
             <motion.div 
@@ -401,6 +485,14 @@ export default function BattleRoom({ socket, roomId, username, playerNum }) {
               </motion.div>
               <h3>{opponentName}</h3>
               <p className="status-text">Opponent's code is hidden</p>
+              
+              <div className="live-progress">
+                <span className="progress-label">Test Cases Passed</span>
+                <span className="progress-val">
+                  {testProgress[opponentName] || '0/0'}
+                </span>
+              </div>
+
               <div className="coding-indicator">
                 <span className="dot"></span>
                 <span className="dot"></span>

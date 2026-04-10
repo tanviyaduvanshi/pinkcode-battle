@@ -9,6 +9,25 @@ const path = require('path');
 const os = require('os');
 const problems = require('./problems.json');
 
+// Persistent Leaderboard & Users
+const leaderboardPath = path.join(__dirname, 'leaderboard.json');
+let leaderboard = {};
+if (fs.existsSync(leaderboardPath)) {
+  leaderboard = JSON.parse(fs.readFileSync(leaderboardPath, 'utf8'));
+}
+function saveLeaderboard() {
+  fs.writeFileSync(leaderboardPath, JSON.stringify(leaderboard, null, 2));
+}
+
+const usersPath = path.join(__dirname, 'users.json');
+let usersDB = {};
+if (fs.existsSync(usersPath)) {
+  usersDB = JSON.parse(fs.readFileSync(usersPath, 'utf8'));
+}
+function saveUsers() {
+  fs.writeFileSync(usersPath, JSON.stringify(usersDB, null, 2));
+}
+
 const app = express();
 app.use(cors());
 
@@ -204,6 +223,7 @@ function getSanitizedState(room) {
     problem: room.problem,
     round: room.round,
     scores: room.scores,
+    testProgress: room.testProgress,
     roundHistory: room.roundHistory,
     endTime: room.endTime,
     player1: { username: room.player1.username },
@@ -220,6 +240,8 @@ function advanceRound(roomId) {
   room.problem = getRandomProblem(room.usedProblemIds);
   room.player1.code = '';
   if (room.player2) room.player2.code = '';
+  room.testProgress = { [room.player1.username]: '0/0' };
+  if (room.player2) room.testProgress[room.player2.username] = '0/0';
   room.endTime = Date.now() + ROUND_DURATION_MS;
 
   io.to(roomId).emit('newRound', getSanitizedState(room));
@@ -227,6 +249,25 @@ function advanceRound(roomId) {
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
+  socket.emit('leaderboardData', leaderboard);
+
+  socket.on('register', ({ username, password }) => {
+    if (Object.keys(usersDB).includes(username) || username.trim() === '') {
+      socket.emit('authError', 'Username already exists or is invalid.');
+    } else {
+      usersDB[username] = { password, matchHistory: [] };
+      saveUsers();
+      socket.emit('authSuccess', { username });
+    }
+  });
+
+  socket.on('login', ({ username, password }) => {
+    if (usersDB[username] && usersDB[username].password === password) {
+      socket.emit('authSuccess', { username, history: usersDB[username].matchHistory });
+    } else {
+      socket.emit('authError', 'Invalid username or password.');
+    }
+  });
 
   socket.on('createRoom', ({ username }) => {
     const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -236,6 +277,7 @@ io.on('connection', (socket) => {
       problem,
       round: 1,
       scores: {},
+      testProgress: { [username]: '0/0' },
       roundHistory: [],
       usedProblemIds: [problem.id],
       player1: { id: socket.id, username, code: '' },
@@ -244,6 +286,11 @@ io.on('connection', (socket) => {
     };
     rooms[roomId].scores[username] = 0;
     
+    // Add to global leaderboard if not exists
+    if (leaderboard[username] === undefined) leaderboard[username] = 0;
+    saveLeaderboard();
+    io.emit('leaderboardData', leaderboard);
+
     socket.join(roomId);
     socket.emit('roomJoined', { roomId, playerNum: 1 });
     io.to(roomId).emit('roomState', getSanitizedState(rooms[roomId]));
@@ -255,7 +302,13 @@ io.on('connection', (socket) => {
     if (room && !room.player2) {
       room.player2 = { id: socket.id, username, code: '' };
       room.scores[username] = 0;
+      room.testProgress[username] = '0/0';
       room.endTime = Date.now() + ROUND_DURATION_MS;
+
+      // Add to global leaderboard if not exists
+      if (leaderboard[username] === undefined) leaderboard[username] = 0;
+      saveLeaderboard();
+      io.emit('leaderboardData', leaderboard);
 
       socket.join(roomId);
       socket.emit('roomJoined', { roomId, playerNum: 2 });
@@ -287,6 +340,17 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('chatMessage', { username, message, time: Date.now() });
   });
 
+  socket.on('requestHint', ({ roomId, username }) => {
+    const room = rooms[roomId];
+    if (room && room.problem.hint) {
+      // Send hint exclusively to requester via socket emit, not room broadcast
+      socket.emit('hintDelivered', { hint: room.problem.hint });
+      // Notify everyone we froze this player
+      io.to(roomId).emit('playerFrozen', { username, target: username, duration: 15000 });
+      // Deduct XP or score optionally? We'll just freeze for 15s
+    }
+  });
+
   socket.on('submitCode', ({ roomId, code, playerNum, language }) => {
     const room = rooms[roomId];
     if (!room) return;
@@ -311,17 +375,43 @@ io.on('connection', (socket) => {
       const outputMsg = result.logs.join('\n');
       const passStr = `${result.passed}/${result.total}`;
 
+      const username = playerNum === 1 ? room.player1.username : room.player2.username;
+      room.testProgress[username] = passStr;
+      io.to(roomId).emit('testProgressUpdate', room.testProgress);
+
       if (result.passed === result.total) {
-        const winnerName = playerNum === 1 ? room.player1.username : room.player2.username;
+        const winnerName = username;
         
+        let linesCount = code.split('\n').filter(l => l.trim().length > 0).length;
+        let isCleanCoder = false;
+        if (room.problem.optimalLines && linesCount <= room.problem.optimalLines) {
+           isCleanCoder = true;
+           leaderboard[winnerName] = (leaderboard[winnerName] || 0) + 15; // +5 Bonus
+        } else {
+           leaderboard[winnerName] = (leaderboard[winnerName] || 0) + 10;
+        }
+        saveLeaderboard();
+        io.emit('leaderboardData', leaderboard);
+
+        // Update User History
+        if (usersDB[room.player1.username]) {
+          usersDB[room.player1.username].matchHistory.push({ result: winnerName === room.player1.username ? 'Win' : 'Loss', problem: room.problem.title });
+          saveUsers();
+        }
+        if (room.player2 && usersDB[room.player2.username]) {
+          usersDB[room.player2.username].matchHistory.push({ result: winnerName === room.player2.username ? 'Win' : 'Loss', problem: room.problem.title });
+          saveUsers();
+        }
+
         // Update scores
         room.scores[winnerName] = (room.scores[winnerName] || 0) + 1;
-        room.roundHistory.push({ round: room.round, winner: winnerName, problem: room.problem.title });
+        room.roundHistory.push({ round: room.round, winner: winnerName, problem: room.problem.title, cleanCoder: isCleanCoder });
         
         io.to(roomId).emit('roundWon', { 
           winner: winnerName, 
           round: room.round, 
           scores: room.scores,
+          cleanCoder: isCleanCoder,
           roundHistory: room.roundHistory
         });
 

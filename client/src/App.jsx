@@ -10,13 +10,20 @@ function App() {
   const [roomId, setRoomId] = useState(null)
   const [username, setUsername] = useState('')
   const [playerNum, setPlayerNum] = useState(null)
+  const [leaderboard, setLeaderboard] = useState({})
 
   useEffect(() => {
     socket.on('roomJoined', (data) => {
       setRoomId(data.roomId)
       setPlayerNum(data.playerNum)
     })
-    return () => { socket.off('roomJoined') }
+    socket.on('leaderboardData', (data) => {
+      setLeaderboard(data)
+    })
+    return () => { 
+      socket.off('roomJoined') 
+      socket.off('leaderboardData')
+    }
   }, [])
 
   const handleCreateRoom = (name) => {
@@ -39,7 +46,14 @@ function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.3 } }}
           >
-            <Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} />
+            <Home 
+              socket={socket}
+              onCreateRoom={handleCreateRoom} 
+              onJoinRoom={handleJoinRoom} 
+              leaderboard={leaderboard} 
+              username={username}
+              setUsername={setUsername}
+            />
           </motion.div>
         ) : (
           <motion.div
